@@ -19,7 +19,6 @@
 #define MAX_NAT_ENTRIES 65535
 #define SET_ENTRY 133
 #define PROCFS_MAX_SIZE 1024
-/* NAT table entry*/
 struct nat_entry {
 	__be32 lan_ipaddr;
 	__be16 lan_port;
@@ -36,7 +35,7 @@ static __be32 lan_ip_first;
 static struct nat_entry nat_table[MAX_NAT_ENTRIES];
 static int start = 0;
 static int timeout = 60; //second
-static char lanstr[20] = "192.168.56.0/24";
+static char lanstr[20] = "10.0.2.15/24";
 static u_int16_t port = 10000;
 static struct proc_dir_entry *NAT;
 static struct proc_dir_entry *proc_ip, *proc_lan, *proc_timeout, *proc_start;
@@ -283,11 +282,8 @@ void update_tcp_ip_checksum(
 // Source NAT
 unsigned int main_hook_post(
         void *priv,
-
 		struct sk_buff *skb,
-
         const struct nf_hook_state *state)
-
 {
 	struct iphdr *iph;
 	struct tcphdr *tcph;
@@ -321,7 +317,7 @@ unsigned int main_hook_post(
 			}
 			else{
 				/*Make a new NAT entry choose port numbers > 10000*/
-				newport = htons(port++); // htons : Host to Network Short
+				newport = htons(port++); 
 				if(port == 0) 
                     port = 10000;
 				nat_table[newport].valid = SET_ENTRY;
@@ -342,48 +338,31 @@ unsigned int main_hook_post(
 
 // Destination NAT
 unsigned int main_hook_pre(
-
         void *priv,
-
 		struct sk_buff *skb,
-
         const struct nf_hook_state *state)
 {
 	struct iphdr *iph;
 	struct tcphdr *tcph;
 	__be16 lan_port;
 	
-
 	if(start == 0)
 		return NF_ACCEPT;
 	if (!skb) return NF_ACCEPT;
 
 	printk("PRE ROUTING");
 
-
 	iph = ip_hdr(skb);
 
 	if (!iph) return NF_ACCEPT;
 
-
 	if (iph->protocol == IPPROTO_TCP){
 
 		if(iph->daddr == myip){
-
 			tcph = (struct tcphdr*)((char *)iph + iph->ihl*4);
 			if(!tcph) return NF_ACCEPT;
 			if(nat_table[tcph->dest].valid == SET_ENTRY){
-
-				// /*lazy checking of stale entries*/
-				// if((get_seconds() - nat_table[tcph->dest].sec) > timeout)
-				// {
-				// 	/*stale entry which means we do not have a NAT entry for this packet*/
-				// 	nat_table[tcph->dest].valid = 0;
-				// 	return NF_ACCEPT;
-				// }
-                // tcp connect finish
-                if(tcph->fin || tcph->rst){ 
-
+                if(tcph->fin || tcph->rst){ // tcp connect finish
                     nat_table[tcph->dest].valid = 0;
                     return NF_ACCEPT;
                 }
@@ -409,6 +388,15 @@ unsigned int main_hook_pre(
 	return NF_ACCEPT;
 
 }
+
+
+				// /*lazy checking of stale entries*/
+				// if((get_seconds() - nat_table[tcph->dest].sec) > timeout)
+				// {
+				// 	/*stale entry which means we do not have a NAT entry for this packet*/
+				// 	nat_table[tcph->dest].valid = 0;
+				// 	return NF_ACCEPT;
+				// }
 static int __init init(void){
     
 	int mask = 24;
@@ -421,28 +409,24 @@ static int __init init(void){
 	}
 	//le_mask = le_mask << zeroes;
 	lan_ip_mask = le_mask;
-    lan_ip_first = htonl(ip_asc_to_int("192.168.56.0"));
-    myip = htonl(ip_asc_to_int("192.168.2.10"));
+    lan_ip_first = htonl(ip_asc_to_int("10.0.2.0"));
+    myip = htonl(ip_asc_to_int("122.42.13.59"));
+
+    netfilter_ops_in.hook = main_hook_post;
+	netfilter_ops_in.pf = PF_INET;
+	netfilter_ops_in.hooknum = NF_INET_POST_ROUTING;
+	netfilter_ops_in.priority = NF_IP_PRI_FIRST;
+
+	netfilter_ops_pre.hook = main_hook_pre;
+	netfilter_ops_pre.pf = PF_INET;
+	netfilter_ops_pre.hooknum = NF_INET_PRE_ROUTING;
+	netfilter_ops_pre.priority = NF_IP_PRI_FIRST;
+
     NAT = proc_mkdir("NAT", NULL); //set NULL will default to /proc
 	if(NAT == NULL){
 		rv = -ENOMEM;
 		goto err;
 	}
-    netfilter_ops_in.hook = main_hook_post;
-
-	netfilter_ops_in.pf = PF_INET;
-
-	netfilter_ops_in.hooknum = NF_INET_POST_ROUTING;
-
-	netfilter_ops_in.priority = NF_IP_PRI_FIRST;
-	netfilter_ops_pre.hook = main_hook_pre;
-
-	netfilter_ops_pre.pf = PF_INET;
-
-	netfilter_ops_pre.hooknum = NF_INET_PRE_ROUTING;
-
-	netfilter_ops_pre.priority = NF_IP_PRI_FIRST;
-
     proc_ip = proc_create("ip",RWPERMISSION, NAT , &proc_ip_ops);
     proc_lan = proc_create("lan",RWPERMISSION, NAT , &proc_lan_ops);
     proc_timeout = proc_create("timeout",RWPERMISSION, NAT , &proc_timeout_ops);
@@ -451,8 +435,6 @@ static int __init init(void){
     net_ns = &init_net;
     nf_register_net_hook(net_ns,&netfilter_ops_pre);
     nf_register_net_hook(net_ns,&netfilter_ops_in);
-
-
 
     return 0;
 err:
