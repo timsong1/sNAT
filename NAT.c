@@ -8,6 +8,7 @@
 #include <net/sock.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
+#include <linux/udp.h>
 #include <linux/net.h>
 #include <linux/proc_fs.h>
 #include <linux/string.h>
@@ -24,6 +25,7 @@ struct nat_entry {
 	__be16 lan_port;
 	__be32 wan_ipaddr;
 	__be16 wan_port;
+    __be16 protocol;
 	unsigned long sec;	/*timestamp in seconds*/
 	u_int8_t valid;
 };
@@ -254,13 +256,10 @@ __be16 find_nat_entry(__be32 saddr, __be16 sport)
 			return i;
 		}
 	}
-	return 0;
+	return -1;
 }
-/* update the checksums for tcp and ip*/
-void update_tcp_ip_checksum(
-    struct sk_buff *skb, 
-    struct tcphdr *tcph, 
-	struct iphdr *iph)
+// update the tcp checksum
+void update_tcp_ip_checksum(struct sk_buff *skb, struct tcphdr *tcph, struct iphdr *iph)
 {
 		
 	int len;
@@ -278,7 +277,30 @@ void update_tcp_ip_checksum(
 			iph->saddr, iph->daddr,
 			csum_partial((char *)tcph, len-4*iph->ihl, 0));
 	return;
-	
+}
+// update the udp checksum
+void update_udp_ip_checksum(struct sk_buff *skb, struct udphdr *udph, struct iphdr *iph) {
+    struct pseudo_header {
+        __be32 saddr;
+        __be32 daddr;
+        __u8 zero;
+        __u8 protocol;
+        __be16 len;
+    } psh;
+
+    int len;
+    if (!skb || !iph || !udph) 
+        return ;
+    len = skb->len;
+// update ip checksum
+	iph->check = 0;
+	iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
+// update udp checksum 
+    udph->check = 0;
+    udph->check = csum_tcpudp_magic(iph->saddr,iph->daddr,len,IPPROTO_UDP,
+                                csum_partial(udph,len,0));
+    if(udph->check == 0)
+        udph->check = CSUM_MANGLED_0;
 }
 // Source NAT
 unsigned int main_hook_post(
@@ -288,6 +310,7 @@ unsigned int main_hook_post(
 {
 	struct iphdr *iph;
 	struct tcphdr *tcph;
+    struct udphdr *udph;
 	__be32 oldip, newip;
 	__be16  newport;
 	int len = 0;
@@ -307,16 +330,16 @@ unsigned int main_hook_post(
         oldip = iph->saddr;
 		/*Is this packet from given LAN range*/
 		if((oldip & lan_ip_mask) == lan_ip_first){
-
-            tcph = (struct tcphdr*)((char *)iph + iph->ihl*4); // ihl : ip header length
-			if(!tcph) return NF_ACCEPT;    
-            			if(!tcph) return NF_ACCEPT;
+            tcph = tcp_hdr(skb);
+            //tcph = (struct tcphdr*)((char *)iph + iph->ihl*4); // ihl : ip header length
+			if(!tcph) 
+                return NF_ACCEPT;    
 			newport = find_nat_entry(iph->saddr, tcph->source);
 			if(newport){
 				/*NAT entry already exists*/
 				tcph->source = newport;
 			}
-			else{
+			else {
 				/*Make a new NAT entry choose port numbers > 10000*/
 				newport = htons(port++); 
 				if(port == 0) 
@@ -326,6 +349,7 @@ unsigned int main_hook_post(
 				nat_table[newport].lan_port = tcph->source;
 				nat_table[newport].wan_ipaddr=iph->daddr;
 				nat_table[newport].wan_port=tcph->dest;
+                nat_table[newport].protocol = IPPROTO_TCP;
 				nat_table[newport].sec = get_seconds();
 				tcph->source = newport;
 				
@@ -335,6 +359,39 @@ unsigned int main_hook_post(
 			update_tcp_ip_checksum(skb, tcph, iph);	        
         }
 
+    }
+    else if(iph->protocol == IPPROTO_UDP){
+        oldip = iph->saddr;
+		/*Is this packet from given LAN range*/
+		if((oldip & lan_ip_mask) == lan_ip_first){
+            udph = udp_hdr(skb);
+            //udph = (struct udphr*)((char *)iph + iph->ihl*4);
+            if(!udph) 
+                return NF_ACCEPT;    
+			newport = find_nat_entry(iph->saddr, udph->source);
+			if(newport){
+				/*NAT entry already exists*/
+				udph->source = newport;
+			}
+			else {
+				/*Make a new NAT entry choose port numbers > 10000*/
+				newport = htons(port++); 
+				if(port == 0) 
+                    port = 10000;
+				nat_table[newport].valid = SET_ENTRY;
+				nat_table[newport].lan_ipaddr = iph->saddr;
+				nat_table[newport].lan_port = udph->source;
+				nat_table[newport].wan_ipaddr=iph->daddr;
+				nat_table[newport].wan_port=udph->dest;
+                nat_table[newport].protocol = IPPROTO_UDP;
+				nat_table[newport].sec = get_seconds();
+				udph->source = newport;
+				
+			}
+			iph->saddr = myip;	
+			newip = iph->saddr;
+			update_udp_checksum(skb, tcph, iph);	    
+        }
     }
     return NF_ACCEPT;
 }
@@ -365,6 +422,8 @@ unsigned int main_hook_pre(
 			tcph = (struct tcphdr*)((char *)iph + iph->ihl*4);
 			if(!tcph) return NF_ACCEPT;
             __be16 tcpdest = tcph->dest;
+            if(tcpdest >= MAX_NAT_ENTRIES)
+                return NF_DROP;
 			if(nat_table[tcpdest].valid == SET_ENTRY){
                 if(iph->saddr == nat_table[tcpdest].wan_ipaddr && 
 					tcph->source == nat_table[tcpdest].wan_port)
@@ -387,7 +446,7 @@ unsigned int main_hook_pre(
 				    tcph->dest = lan_port;
 				    //re-calculate checksum
 				    update_tcp_ip_checksum(skb, tcph, iph);
-                    pr_info("Address translate : from %s:%s to %s:%s -> from %s:%s to %s:%s",
+                    pr_info("DNAT : from %s:%s to %s:%s -> from %s:%s to %s:%s",
 					iph->saddr,tcph->source,myip,tcpdest,iph->saddr,tcph->source,iph->daddr,tcph->dest);
                 }
                 else
@@ -403,14 +462,6 @@ unsigned int main_hook_pre(
 
 }
 
-
-				// /*lazy checking of stale entries*/
-				// if((get_seconds() - nat_table[tcph->dest].sec) > timeout)
-				// {
-				// 	/*stale entry which means we do not have a NAT entry for this packet*/
-				// 	nat_table[tcph->dest].valid = 0;
-				// 	return NF_ACCEPT;
-				// }
 static int __init init(void){
     
 	int mask = 24;
@@ -423,8 +474,8 @@ static int __init init(void){
 	}
 	//le_mask = le_mask << zeroes;
 	lan_ip_mask = le_mask;
-    lan_ip_first = htonl(ip_asc_to_int("10.0.2.0"));
-    myip = htonl(ip_asc_to_int("122.42.13.59"));
+    lan_ip_first = htonl(ip_asc_to_int("192.168.5.0"));
+    myip = htonl(ip_asc_to_int("10.0.2.15"));
 
     netfilter_ops_in.hook = main_hook_post;
 	netfilter_ops_in.pf = PF_INET;
