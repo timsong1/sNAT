@@ -22,7 +22,8 @@
 struct nat_entry {
 	__be32 lan_ipaddr;
 	__be16 lan_port;
-//	__be16 nat_port;
+	__be32 wan_ipaddr;
+	__be16 wan_port;
 	unsigned long sec;	/*timestamp in seconds*/
 	u_int8_t valid;
 };
@@ -323,7 +324,9 @@ unsigned int main_hook_post(
 				nat_table[newport].valid = SET_ENTRY;
 				nat_table[newport].lan_ipaddr = iph->saddr;
 				nat_table[newport].lan_port = tcph->source;
-				nat_table[newport].sec = ktime_get_seconds();
+				nat_table[newport].wan_ipaddr=iph->daddr;
+				nat_table[newport].wan_port=tcph->dest;
+				nat_table[newport].sec = get_seconds();
 				tcph->source = newport;
 				
 			}
@@ -361,25 +364,36 @@ unsigned int main_hook_pre(
 		if(iph->daddr == myip){
 			tcph = (struct tcphdr*)((char *)iph + iph->ihl*4);
 			if(!tcph) return NF_ACCEPT;
-			if(nat_table[tcph->dest].valid == SET_ENTRY){
-                if(tcph->fin || tcph->rst){ // tcp connect finish
-                    nat_table[tcph->dest].valid = 0;
-                    return NF_ACCEPT;
+            __be16 tcpdest = tcph->dest;
+			if(nat_table[tcpdest].valid == SET_ENTRY){
+                if(iph->saddr == nat_table[tcpdest].wan_ipaddr && 
+					tcph->source == nat_table[tcpdest].wan_port)
+				{
+                    if(tcph->fin || tcph->rst){ // tcp connect finish
+                        nat_table[tcpdest].valid = 0;
+                        return NF_ACCEPT;
+                    }
+                    else if(tcph->psh || tcph->ack){
+                        // if active, entry will not expire
+                        nat_table[tcpdest].sec = ktime_get_seconds();
+                    }
+                    if((ktime_get_seconds() - nat_table[tcph->dest].sec) > timeout){
+                        nat_table[tcpdest].valid = 0;
+                        return NF_DROP;
+                    }
+				    // translate ip addr and port
+				    lan_port = nat_table[tcpdest].lan_port;
+				    iph->daddr = nat_table[tcpdest].lan_ipaddr;
+				    tcph->dest = lan_port;
+				    //re-calculate checksum
+				    update_tcp_ip_checksum(skb, tcph, iph);
+                    pr_info("Address translate : from %s:%s to %s:%s -> from %s:%s to %s:%s",
+					iph->saddr,tcph->source,myip,tcpdest,iph->saddr,tcph->source,iph->daddr,tcph->dest);
                 }
-                else if(tcph->psh || tcph->ack){
-                    // if active, entry will not expire
-                    nat_table[tcph->dest].sec = ktime_get_seconds();
-                }
-                if((ktime_get_seconds() - nat_table[tcph->dest].sec) > timeout){
-                    nat_table[tcph->dest].valid = 0;
-                    return NF_DROP;
-                }
-				// translate ip addr and port
-				lan_port = nat_table[tcph->dest].lan_port;
-				iph->daddr = nat_table[tcph->dest].lan_ipaddr;
-				tcph->dest = lan_port;
-				//re-calculate checksum
-				update_tcp_ip_checksum(skb, tcph, iph);
+                else
+				{
+					pr_info();
+				}
 			}
 		}
 	}
