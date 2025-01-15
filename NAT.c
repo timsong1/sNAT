@@ -259,7 +259,7 @@ __be16 find_nat_entry(__be32 saddr, __be16 sport,__u8 protocol)
 	}
 	return -1;
 }
-// update tcp ip checksum
+// update tcp and ip checksum
 void update_tcp_ip_checksum(struct sk_buff *skb, struct tcphdr *tcph, struct iphdr *iph)
 {
 		
@@ -279,7 +279,7 @@ void update_tcp_ip_checksum(struct sk_buff *skb, struct tcphdr *tcph, struct iph
 			csum_partial((char *)tcph, len-4*iph->ihl, 0));
 	return;
 }
-// update udp ip checksum
+// update udp and ip checksum
 void update_udp_ip_checksum(struct sk_buff *skb, struct udphdr *udph, struct iphdr *iph) {
     struct pseudo_header {
         __be32 saddr;
