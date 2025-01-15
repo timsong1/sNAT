@@ -238,13 +238,14 @@ static struct nf_hook_ops netfilter_ops_in, netfilter_ops_pre;
 static struct net *net_ns;
 /*find the nat table entry for given lan port. 
 @sport = source port as obtained from packet from lan*/
-__be16 find_nat_entry(__be32 saddr, __be16 sport)
+__be16 find_nat_entry(__be32 saddr, __be16 sport,__u8 protocol)
 {
 	int i = 0;
 	unsigned int t = 0;
 	for(i = 0; i < MAX_NAT_ENTRIES; i++)
 	{
-		if((nat_table[i].lan_ipaddr == saddr) && (nat_table[i].lan_port == sport) && nat_table[i].valid)
+		if((nat_table[i].lan_ipaddr == saddr) && (nat_table[i].lan_port == sport) 
+            && (nat_table[i].protocol == protocol) && (nat_table[i].valid))
 		{
 			t = (ktime_get_seconds() - nat_table[i].sec);
 			if(t > timeout)
@@ -334,7 +335,7 @@ unsigned int main_hook_post(
             //tcph = (struct tcphdr*)((char *)iph + iph->ihl*4); // ihl : ip header length
 			if(!tcph) 
                 return NF_ACCEPT;    
-			newport = find_nat_entry(iph->saddr, tcph->source);
+			newport = find_nat_entry(iph->saddr, tcph->source, iph->protocol);
 			if(newport){
 				/*NAT entry already exists*/
 				tcph->source = newport;
@@ -368,7 +369,7 @@ unsigned int main_hook_post(
             //udph = (struct udphr*)((char *)iph + iph->ihl*4);
             if(!udph) 
                 return NF_ACCEPT;    
-			newport = find_nat_entry(iph->saddr, udph->source);
+			newport = find_nat_entry(iph->saddr, udph->source, iph->protocol);
 			if(newport){
 				/*NAT entry already exists*/
 				udph->source = newport;
@@ -390,7 +391,7 @@ unsigned int main_hook_post(
 			}
 			iph->saddr = myip;	
 			newip = iph->saddr;
-			update_udp_checksum(skb, tcph, iph);	    
+			update_udp_ip_checksum(skb, udph, iph);	    
         }
     }
     return NF_ACCEPT;
@@ -404,6 +405,7 @@ unsigned int main_hook_pre(
 {
 	struct iphdr *iph;
 	struct tcphdr *tcph;
+    struct udphdr *udph;
 	__be16 lan_port;
 	
 	if(start == 0)
@@ -419,7 +421,8 @@ unsigned int main_hook_pre(
 	if (iph->protocol == IPPROTO_TCP){
 
 		if(iph->daddr == myip){
-			tcph = (struct tcphdr*)((char *)iph + iph->ihl*4);
+            tcph = tcp_hdr(skb);
+			//tcph = (struct tcphdr*)((char *)iph + iph->ihl*4);
 			if(!tcph) return NF_ACCEPT;
             __be16 tcpdest = tcph->dest;
             if(tcpdest >= MAX_NAT_ENTRIES)
@@ -447,7 +450,11 @@ unsigned int main_hook_pre(
 				    //re-calculate checksum
 				    update_tcp_ip_checksum(skb, tcph, iph);
                     pr_info("DNAT : from %s:%s to %s:%s -> from %s:%s to %s:%s",
-					iph->saddr,tcph->source,myip,tcpdest,iph->saddr,tcph->source,iph->daddr,tcph->dest);
+					iph->saddr,tcph->source,
+                    myip,tcpdest,
+                    iph->saddr,tcph->source,
+                    iph->daddr,tcph->dest);
+                    return NF_ACCEPT;
                 }
                 else
 				{
@@ -456,9 +463,43 @@ unsigned int main_hook_pre(
 			}
 		}
 	}
+    else if (iph->protocol == IPPROTO_UDP){
+        if(iph->daddr == myip){
+            udph = udp_hdr(skb);
+			//tcph = (struct tcphdr*)((char *)iph + iph->ihl*4);
+			if(!udph) return NF_ACCEPT;
+            __be16 udpdest = udph->dest;
+            if(udpdest >= MAX_NAT_ENTRIES)
+                return NF_DROP;
+			if(nat_table[udpdest].valid == SET_ENTRY){
+                if(iph->saddr == nat_table[udpdest].wan_ipaddr && 
+					udph->source == nat_table[udpdest].wan_port)
+				{
+                    if((ktime_get_seconds() - nat_table[udph->dest].sec) > timeout){
+                        nat_table[udpdest].valid = 0;
+                        return NF_DROP;
+                    }
+				    lan_port = nat_table[udpdest].lan_port;
+				    iph->daddr = nat_table[udpdest].lan_ipaddr;
+				    udph->dest = lan_port;
+				    //re-calculate checksum
+				    update_udp_ip_checksum(skb, udph, iph);
+                    pr_info("DNAT UDP : from %s:%s to %s:%s -> from %s:%s to %s:%s",
+					iph->saddr,udph->source,
+                    myip,udpdest,
+                    iph->saddr,udph->source,
+                    iph->daddr,udph->dest);
+                    return NF_ACCEPT;
+                }
+                else 
+				{
+					pr_info();
+				}
+			}
+		}
+    }
 
-
-	return NF_ACCEPT;
+	return NF_DROP;
 
 }
 
