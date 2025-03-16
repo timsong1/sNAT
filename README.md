@@ -1,4 +1,7 @@
-# NAT
-A PAT(port address translation) linux kernel module
-- Implement SNAT DNAT
-- Handle TCP UDP packet
+# sNAT
+A Linux kernel module for Network Address Translation (NAT)
+
+## Features
+- Supports Source NAT (SNAT) and Destination NAT (DNAT)
+- Implements Port Address Translation (PAT)
+- Handles TCP and UDP packet translation
